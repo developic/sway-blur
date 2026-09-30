@@ -1,0 +1,21 @@
+# Windows treated as transparent: the blurred snapshot is shown behind these app_ids.
+allowlist_app_ids = [
+  "com.mitchellh.ghostty",
+  "Alacritty",
+  "kitty",
+  "foot",
+]
+# Blur strength. Higher = more blur.
+blur = 2.0
+# The screenshot is shrunk by this factor before blurring. Higher = faster and smoother.
+downscale = 8
+# Dark tint mixed into the blur, 0-100 (percent). 0 = no tint.
+tint = 0.0
+# Rapid sway events are coalesced for this long before refreshing (milliseconds).
+debounce_ms = 150.0
+# Wait after hiding before capturing, so the compositor presents the hidden frame (milliseconds).
+hide_settle_ms = 25.0
+# Re-check the tree on this cadence even with no events, e.g. drags (milliseconds; 0 = off).
+revalidate_ms = 1000.0
+# Snapshots kept per window.
+snapshot_cache_max = 16
