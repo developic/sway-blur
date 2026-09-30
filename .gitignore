@@ -1,0 +1,20 @@
+# Rust build output
+/target/
+debug/
+release/
+
+# Cargo lock backup
+*.orig
+*.bk
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Lockfile-adjacent / local caches
+.cache/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
