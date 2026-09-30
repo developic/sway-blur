@@ -325,34 +325,6 @@ impl Daemon {
     }
 }
 
-/// --watch-only: print what the daemon WOULD do (no capture/overlay).
-pub fn preview_refresh(config: &Config) {
-    println!("--- refresh ---");
-    match tree::get_visible_terminals(&config.allow) {
-        Err(e) => eprintln!("[watch-only] tree query failed: {e:#}"),
-        Ok(terms) => {
-            if terms.is_empty() {
-                println!("HIDE  (no visible terminals)");
-            }
-            for t in terms {
-                let r = t.rect;
-                println!(
-                    "BLUR  {}#{} on {} @ {},{} {}x{}{}",
-                    t.app_id,
-                    t.con_id,
-                    t.output,
-                    r.x,
-                    r.y,
-                    r.width,
-                    r.height,
-                    if t.floating { " (floating)" } else { "" }
-                );
-            }
-        }
-    }
-    flush();
-}
-
 /// flock guard: sway `exec_always` reloads can't stack daemons. Caller holds the return.
 pub fn acquire_single_instance() -> Result<std::fs::File> {
     use fs2::FileExt;

@@ -42,25 +42,6 @@ fn main() -> Result<()> {
     let config = config::Config::load(&config_path)
         .with_context(|| format!("loading {}", config_path.display()))?;
 
-    if argv.iter().any(|a| a == "--watch-only") {
-        let seconds = parse_seconds(&argv);
-        let cfg = config.clone();
-        let watcher = watcher::Watcher::new(&config, move || daemon::preview_refresh(&cfg));
-        if seconds > 0.0 {
-            let w2 = watcher.clone();
-            std::thread::spawn(move || {
-                if let Err(e) = w2.run() {
-                    eprintln!("[watcher] exited: {e:#}");
-                }
-            });
-            std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
-            watcher.stop();
-        } else if let Err(e) = watcher.run() {
-            eprintln!("[watcher] exited: {e:#}");
-        }
-        return Ok(());
-    }
-
     // Single-instance guard (held for the process lifetime).
     let _lock = daemon::acquire_single_instance()?;
 
