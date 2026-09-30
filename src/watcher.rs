@@ -1,10 +1,7 @@
 use crate::config::Config;
 use crate::ipc;
 use anyhow::{Context, Result};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,7 +12,6 @@ pub struct Watcher {
     on_change: Arc<dyn Fn() + Send + Sync>,
     /// Last kick time; `None` means clean. One field, no invalid states.
     dirty_since: Mutex<Option<Instant>>,
-    stop: AtomicBool,
 }
 
 impl Watcher {
@@ -27,7 +23,6 @@ impl Watcher {
             debounce: Duration::from_secs_f64(config.debounce_s),
             on_change: Arc::new(on_change),
             dirty_since: Mutex::new(None),
-            stop: AtomicBool::new(false),
         })
     }
 
@@ -37,7 +32,7 @@ impl Watcher {
     }
 
     fn debounce_loop(self: Arc<Self>) {
-        while !self.stop.load(Ordering::SeqCst) {
+        loop {
             thread::sleep(Duration::from_millis(50));
             let fire = {
                 let mut g = self.dirty_since.lock().unwrap_or_else(|e| e.into_inner());
@@ -70,20 +65,16 @@ impl Watcher {
     pub fn run(self: &Arc<Self>) -> Result<()> {
         let this = Arc::clone(self);
         thread::spawn(move || this.debounce_loop());
-        while !self.stop.load(Ordering::SeqCst) {
+        loop {
             match self.subscribe_once() {
                 Ok(()) => {}
                 Err(e) => {
-                    if self.stop.load(Ordering::SeqCst) {
-                        break;
-                    }
                     eprintln!("[watcher] subscribe failed ({e:#}); retrying…");
-                    // Failures are rare: one plain sleep, then re-check stop.
+                    // Failures are rare: one plain sleep before reconnecting.
                     thread::sleep(Duration::from_secs(1));
                 }
             }
         }
-        Ok(())
     }
 
     /// One subscription lifetime. Idle 10s read timeouts are a healthy heartbeat.
@@ -102,9 +93,6 @@ impl Watcher {
         let _ = std::io::Write::flush(&mut std::io::stdout());
         self.kick(); // initial state: capture everything
         loop {
-            if self.stop.load(Ordering::SeqCst) {
-                return Ok(());
-            }
             match ipc::recv(&mut sock) {
                 Ok((mtype, _payload)) => {
                     if mtype & ipc::EVENT_BIT != 0 {
@@ -115,9 +103,5 @@ impl Watcher {
                 Err(e) => return Err(e).context("watcher IPC recv"),
             }
         }
-    }
-
-    pub fn stop(&self) {
-        self.stop.store(true, Ordering::SeqCst);
     }
 }

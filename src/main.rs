@@ -17,16 +17,6 @@ mod watcher;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-fn parse_seconds(argv: &[String]) -> f64 {
-    let mut seconds = 0.0;
-    for a in &argv[1..] {
-        if let Ok(v) = a.parse::<f64>() {
-            seconds = v;
-        }
-    }
-    seconds
-}
-
 fn get_config_file_path() -> Result<PathBuf> {
     match std::env::var_os("HOME") {
         Some(v) if !v.is_empty() => {
@@ -37,7 +27,6 @@ fn get_config_file_path() -> Result<PathBuf> {
 }
 
 fn main() -> Result<()> {
-    let argv: Vec<String> = std::env::args().collect();
     let config_path = get_config_file_path()?;
     let config = config::Config::load(&config_path)
         .with_context(|| format!("loading {}", config_path.display()))?;
@@ -49,5 +38,5 @@ fn main() -> Result<()> {
     // The overlay lives on this (GTK) thread; the daemon worker only gets
     // the message handle. Spawn after init, before the main loop runs.
     let overlay = overlay::OverlayHandle::spawn();
-    daemon::Daemon::new(config, overlay).run(parse_seconds(&argv))
+    daemon::Daemon::new(config, overlay).run()
 }

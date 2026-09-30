@@ -8,10 +8,7 @@ use crate::watcher::Watcher;
 use anyhow::Result;
 use image::RgbaImage;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Condvar, Mutex, MutexGuard,
-};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -71,6 +68,26 @@ impl Cache {
             }
         }
     }
+
+    /// Drop snapshots for cons that no longer exist anywhere in the sway
+    /// tree (closed windows). Hidden-workspace cons still exist, so their
+    /// snapshots survive for instant switch-back. Returns evicted count.
+    fn prune_closed(&mut self, alive: &HashSet<i64>) -> usize {
+        let dead: Vec<i64> = self
+            .map
+            .keys()
+            .filter(|id| !alive.contains(*id))
+            .copied()
+            .collect();
+        let n = dead.len();
+        for id in dead {
+            self.map.remove(&id);
+            if let Some(pos) = self.order.iter().position(|&x| x == id) {
+                self.order.remove(pos);
+            }
+        }
+        n
+    }
 }
 
 struct Shared {
@@ -80,7 +97,6 @@ struct Shared {
     live_keys: Mutex<HashSet<(String, i64)>>,
     dirty: Mutex<bool>,
     cvar: Condvar,
-    stop: AtomicBool,
     /// Lock-free message handle to the GTK thread.
     overlay: OverlayHandle,
 }
@@ -123,7 +139,6 @@ impl Daemon {
                 live_keys: Mutex::new(HashSet::new()),
                 dirty: Mutex::new(false),
                 cvar: Condvar::new(),
-                stop: AtomicBool::new(false),
                 overlay,
             }),
         }
@@ -178,13 +193,21 @@ impl Daemon {
     }
 
     fn refresh_all(shared: &Arc<Shared>) {
-        let terms: Vec<Term> = match tree::get_visible_terminals(&shared.config.allow) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("[daemon] tree query failed: {e:#}");
-                return;
-            }
-        };
+        let (terms, all_ids): (Vec<Term>, HashSet<i64>) =
+            match tree::get_visible_terminals_and_all_ids(&shared.config.allow) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("[daemon] tree query failed: {e:#}");
+                    return;
+                }
+            };
+        // Free pixel buffers of truly closed windows on every pass.
+        // Hidden-workspace ids are still alive, so switch-back stays cached.
+        let evicted = lock(&shared.cache).prune_closed(&all_ids);
+        if evicted > 0 {
+            println!("[daemon] evict {evicted} closed snapshots");
+            flush();
+        }
         let overlay = &shared.overlay;
         if terms.is_empty() {
             // Hide + log only on transition, not every timer tick.
@@ -262,7 +285,7 @@ impl Daemon {
         loop {
             {
                 let mut g = lock(&shared.dirty);
-                while !*g && !shared.stop.load(Ordering::SeqCst) {
+                while !*g {
                     g = match shared.cvar.wait_timeout(g, Duration::from_millis(100)) {
                         Ok((g, _)) => g,
                         Err(e) => e.into_inner().0,
@@ -270,9 +293,6 @@ impl Daemon {
                     if !*g && !revalidate.is_zero() && last_pass.elapsed() >= revalidate {
                         *g = true; // timer tick, not an event
                     }
-                }
-                if shared.stop.load(Ordering::SeqCst) {
-                    return;
                 }
                 *g = false;
             }
@@ -289,8 +309,7 @@ impl Daemon {
     }
 
     /// GTK on the calling thread; IPC + capture on background threads.
-    /// `seconds > 0` quits after that long.
-    pub fn run(self, seconds: f64) -> Result<()> {
+    pub fn run(self) -> Result<()> {
         Self::refresh_outputs(&self.shared);
 
         let w_shared = Arc::clone(&self.shared);
@@ -308,16 +327,6 @@ impl Daemon {
         thread::spawn(move || Self::worker_loop(s_worker));
         Self::request_refresh(&self.shared); // initial state
 
-        if seconds > 0.0 {
-            let s_quit = Arc::clone(&self.shared);
-            let ms = (seconds * 1000.0) as u64;
-            glib::timeout_add_once(Duration::from_millis(ms), move || {
-                watcher.stop();
-                s_quit.stop.store(true, Ordering::SeqCst);
-                s_quit.cvar.notify_all();
-                gtk::main_quit();
-            });
-        }
         println!("[daemon] running");
         flush();
         gtk::main();

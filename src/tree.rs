@@ -114,9 +114,31 @@ impl Walker<'_> {
     }
 }
 
-/// All VISIBLE allowlisted windows. Each carries a `below` fingerprint,
-/// so focus/workspace switches are pure cache hits.
-pub fn get_visible_terminals(allow: &HashSet<String>) -> Result<Vec<Term>> {
+/// Every con/floating_con id anywhere in the tree (visible or not).
+/// Used to evict snapshots of truly closed windows while keeping
+/// hidden-workspace windows cached for instant switch-back.
+fn collect_all_ids(node: &serde_json::Value, out: &mut HashSet<i64>) {
+    let ntype = node.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    if ntype == "con" || ntype == "floating_con" {
+        if let Some(id) = node.get("id").and_then(|id| id.as_i64()) {
+            out.insert(id);
+        }
+    }
+    for key in ["nodes", "floating_nodes"] {
+        if let Some(arr) = node.get(key).and_then(|n| n.as_array()) {
+            for child in arr {
+                collect_all_ids(child, out);
+            }
+        }
+    }
+}
+
+/// All VISIBLE allowlisted windows + every con id in the tree.
+/// Single GET_TREE roundtrip: the id set drives cache eviction of closed
+/// windows without dropping hidden-workspace snapshots.
+pub fn get_visible_terminals_and_all_ids(
+    allow: &HashSet<String>,
+) -> Result<(Vec<Term>, HashSet<i64>)> {
     let tree = ipc::once(ipc::T_GET_TREE, "")?;
     let mut w = Walker {
         allow,
@@ -131,6 +153,8 @@ pub fn get_visible_terminals(allow: &HashSet<String>) -> Result<Vec<Term>> {
     for top in tops {
         w.walk(top, None, serde_json::json!({}), None);
     }
+    let mut all_ids = HashSet::new();
+    collect_all_ids(&tree, &mut all_ids);
     let mut out = Vec::with_capacity(w.found.len());
     for mut t in w.found {
         let mut below: Vec<BelowEntry> = w
@@ -142,5 +166,5 @@ pub fn get_visible_terminals(allow: &HashSet<String>) -> Result<Vec<Term>> {
         t.below = below;
         out.push(t);
     }
-    Ok(out)
+    Ok((out, all_ids))
 }
