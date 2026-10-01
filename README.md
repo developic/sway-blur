@@ -25,7 +25,14 @@
 
 ## Quick Start
 
-### Prerequisites
+### Install (one-liner)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/developic/sway-blur/main/install.sh | bash
+```
+### Install from source
+
+#### Prerequisites
 
 - Sway (wlroots with `zwlr_screencopy_v1`)
 - GTK 3, gtk-layer-shell
@@ -35,6 +42,7 @@
 
 ```bash
 cargo build --release
+sudo install -m 0755 target/release/sway-blur /usr/local/bin/
 ```
 
 ### Configure
@@ -55,13 +63,7 @@ cp config.example.toml ~/.config/sway-blur/config.toml
 Autostart in sway config:
 
 ```sway
-exec_always ~/.local/bin/sway-blur
-```
-
-Config path (auto-created with defaults if missing):
-
-```text
-$HOME/.config/sway-blur/config.toml
+exec_always /usr/local/bin/sway-blur
 ```
 
 ## How things work
@@ -90,6 +92,10 @@ graph LR
 ```
 
 ## Configuration
+
+```text
+$HOME/.config/sway-blur/config.toml
+```
 
 | Key | Default | Description |
 |---|---|---|

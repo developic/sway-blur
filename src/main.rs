@@ -27,6 +27,11 @@ fn get_config_file_path() -> Result<PathBuf> {
 }
 
 fn main() -> Result<()> {
+    if std::env::args().skip(1).any(|a| a == "-v" || a == "--version") {
+        println!("sway-blur {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let config_path = get_config_file_path()?;
     let config = config::Config::load(&config_path)
         .with_context(|| format!("loading {}", config_path.display()))?;
