@@ -1,8 +1,8 @@
 [package]
 name = "sway-blur"
-version = "0.1.0"
+version = "1.2.0"
 edition = "2021"
-description = "sway-blur (Tier 2): snapshot blur overlay behind transparent windows — Rust port"
+description = "Blur overlay for Sway"
 license = "MIT"
 
 [[bin]]
