@@ -3,7 +3,6 @@ name: release
 on:
   push:
     branches: [main]
-    tags: ['v*']
 
 concurrency:
   group: release-${{ github.ref }}
@@ -19,9 +18,7 @@ env:
 jobs:
   build:
     name: build (${{ matrix.target }})
-    if: >-
-      startsWith(github.ref, 'refs/tags/v') ||
-      startsWith(github.event.head_commit.message, 'chore(release)')
+    if: startsWith(github.event.head_commit.message, 'chore(release)')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -99,10 +96,9 @@ jobs:
     name: release
     needs: build
     if: >-
-      startsWith(github.ref, 'refs/tags/v') ||
-      (github.event_name == 'push' &&
+      github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
-      startsWith(github.event.head_commit.message, 'chore(release)'))
+      startsWith(github.event.head_commit.message, 'chore(release)')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
