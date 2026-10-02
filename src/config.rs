@@ -139,8 +139,7 @@ mod tests {
 
     #[test]
     fn default_config_parses() {
-        let raw: RawConfig =
-            toml::from_str(DEFAULT_CONFIG).expect("default config must parse");
+        let raw: RawConfig = toml::from_str(DEFAULT_CONFIG).expect("default config must parse");
         let cfg = Config::from_raw(raw);
         assert_eq!(cfg.allow.len(), 4);
         assert_eq!(cfg.cache_max, 16);

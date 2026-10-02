@@ -19,15 +19,16 @@ use std::path::PathBuf;
 
 fn get_config_file_path() -> Result<PathBuf> {
     match std::env::var_os("HOME") {
-        Some(v) if !v.is_empty() => {
-            Ok(PathBuf::from(v).join(".config/sway-blur/config.toml"))
-        }
+        Some(v) if !v.is_empty() => Ok(PathBuf::from(v).join(".config/sway-blur/config.toml")),
         _ => anyhow::bail!("HOME not set (expected $HOME/.config/sway-blur/config.toml)"),
     }
 }
 
 fn main() -> Result<()> {
-    if std::env::args().skip(1).any(|a| a == "-v" || a == "--version") {
+    if std::env::args()
+        .skip(1)
+        .any(|a| a == "-v" || a == "--version")
+    {
         println!("sway-blur {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
