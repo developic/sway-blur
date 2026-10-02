@@ -2,7 +2,7 @@
 <p align="center">
   <strong>Snapshot blur overlay behind transparent windows on Sway</strong>
   <br />
-  <em>blur · ey candy · rust</em>
+  <em>blur · rust</em>
 </p>
 
 <p align="center">
