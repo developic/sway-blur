@@ -18,6 +18,10 @@
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat" alt="License" />
 </p>
 
+<p align="center">
+  <a href="assets/preview.mp4">▶ Watch the preview</a>
+</p>
+
 ## Features
 
 - Blur
