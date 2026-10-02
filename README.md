@@ -63,7 +63,7 @@ cp config.example.toml ~/.config/sway-blur/config.toml
 Autostart in sway config:
 
 ```sway
-exec_always /usr/local/bin/sway-blur
+exec_always sway-blur
 ```
 
 ## How things work
