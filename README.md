@@ -18,6 +18,10 @@
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat" alt="License" />
 </p>
 
+<p align="center">
+  <video src="https://raw.githubusercontent.com/developic/sway-blur/main/assets/preview.mp4" controls width="800" muted loop></video>
+</p>
+
 ## Features
 
 - Blur
