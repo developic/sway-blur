@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <video src="https://raw.githubusercontent.com/developic/sway-blur/main/assets/preview.mp4" controls width="800" muted loop></video>
+  <img src="assets/preview.gif" width="800">
 </p>
 
 ## Features
