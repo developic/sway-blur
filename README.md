@@ -18,9 +18,7 @@
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat" alt="License" />
 </p>
 
-<p align="center">
-  <img src="assets/preview.gif" width="800">
-</p>
+<img src="https://raw.githubusercontent.com/developic/sway-blur/main/assets/preview.gif" width="800">
 
 ## Features
 
