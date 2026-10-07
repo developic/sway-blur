@@ -26,8 +26,6 @@ pub struct Term {
     /// Output-local rect (screencopy crop space).
     pub rect: Rect,
     pub output: String,
-    pub ws_id: i64,
-    pub floating: bool,
     /// Every OTHER visible window on the same workspace (cache fingerprint).
     pub below: Vec<BelowEntry>,
 }

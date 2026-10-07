@@ -3,6 +3,10 @@ use crate::model::{BelowEntry, Rect, Term};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 
+/// A missing node `rect` reads as all zeros, so `rect_on_output` rejects
+/// it. One shared value instead of an object per node.
+static EMPTY_RECT: serde_json::Value = serde_json::Value::Null;
+
 fn as_i32(v: &serde_json::Value, key: &str) -> i32 {
     v.get(key).and_then(|x| x.as_i64()).unwrap_or(0) as i32
 }
@@ -33,17 +37,19 @@ fn rect_on_output(rect: &serde_json::Value, out: &serde_json::Value) -> Option<R
 
 struct Walker<'a> {
     allow: &'a HashSet<String>,
-    found: Vec<Term>,
+    found: Vec<(Term, i64)>,
     /// ws_id -> list of [`BelowEntry`] for ALL visible leaves.
     ws_leaves: HashMap<i64, Vec<BelowEntry>>,
 }
 
 impl Walker<'_> {
-    fn walk(
+    /// Names and rects are borrowed from the tree; only allowlisted hits
+    /// allocate. All tree borrows share one lifetime.
+    fn walk<'a>(
         &mut self,
-        node: &serde_json::Value,
-        out_name: Option<String>,
-        out_rect: serde_json::Value,
+        node: &'a serde_json::Value,
+        out_name: Option<&'a str>,
+        out_rect: &'a serde_json::Value,
         ws_id: Option<i64>,
     ) {
         let ntype = node.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -52,11 +58,8 @@ impl Walker<'_> {
             if node.get("name").and_then(|n| n.as_str()) == Some("__i3") {
                 return;
             }
-            out_name = node
-                .get("name")
-                .and_then(|n| n.as_str())
-                .map(|s| s.to_string());
-            out_rect = node.get("rect").cloned().unwrap_or(serde_json::json!({}));
+            out_name = node.get("name").and_then(|n| n.as_str());
+            out_rect = node.get("rect").unwrap_or(out_rect);
             ws_id = None;
         } else if ntype == "workspace" {
             ws_id = node.get("id").and_then(|id| id.as_i64());
@@ -74,9 +77,8 @@ impl Walker<'_> {
                 .unwrap_or(0)
                 == 0
         {
-            let empty = serde_json::json!({});
-            let rect_v = node.get("rect").unwrap_or(&empty);
-            if let Some(rect) = rect_on_output(rect_v, &out_rect) {
+            let rect_v = node.get("rect").unwrap_or(&EMPTY_RECT);
+            if let Some(rect) = rect_on_output(rect_v, out_rect) {
                 if let (Some(con_id), Some(ws)) = (node.get("id").and_then(|id| id.as_i64()), ws_id)
                 {
                     self.ws_leaves
@@ -85,15 +87,16 @@ impl Walker<'_> {
                         .push((con_id, (rect.x, rect.y, rect.width, rect.height)));
                     if let Some(app_id) = node.get("app_id").and_then(|a| a.as_str()) {
                         if self.allow.contains(app_id) {
-                            self.found.push(Term {
-                                con_id,
-                                app_id: app_id.to_string(),
-                                rect,
-                                output: out_name.clone().unwrap_or_default(),
-                                ws_id: ws,
-                                floating: ntype == "floating_con",
-                                below: Vec::new(),
-                            });
+                            self.found.push((
+                                Term {
+                                    con_id,
+                                    app_id: app_id.to_string(),
+                                    rect,
+                                    output: out_name.unwrap_or_default().to_string(),
+                                    below: Vec::new(),
+                                },
+                                ws,
+                            ));
                         }
                     }
                 }
@@ -109,14 +112,14 @@ impl Walker<'_> {
             .and_then(|n| n.as_array())
             .unwrap_or(&empty_vec);
         for child in nodes.iter().chain(floating.iter()) {
-            self.walk(child, out_name.clone(), out_rect.clone(), ws_id);
+            self.walk(child, out_name, out_rect, ws_id);
         }
     }
 }
 
 /// Every con/floating_con id anywhere in the tree (visible or not).
 /// Used to evict snapshots of truly closed windows while keeping
-/// hidden-workspace windows cached for instant switch-back.
+/// hidden-workspace windows cached, so switching back needs no recapture.
 fn collect_all_ids(node: &serde_json::Value, out: &mut HashSet<i64>) {
     let ntype = node.get("type").and_then(|t| t.as_str()).unwrap_or("");
     if ntype == "con" || ntype == "floating_con" {
@@ -139,7 +142,10 @@ fn collect_all_ids(node: &serde_json::Value, out: &mut HashSet<i64>) {
 pub fn get_visible_terminals_and_all_ids(
     allow: &HashSet<String>,
 ) -> Result<(Vec<Term>, HashSet<i64>)> {
-    let tree = ipc::once(ipc::T_GET_TREE, "")?;
+    // Persistent connection: GET_TREE fires every refresh, so skip the
+    // connect/close pair per call (same thread-local slot as the capture
+    // commands; strictly sequential, never concurrent).
+    let tree = ipc::once_reused(ipc::T_GET_TREE, "")?;
     let mut w = Walker {
         allow,
         found: Vec::new(),
@@ -151,18 +157,19 @@ pub fn get_visible_terminals_and_all_ids(
         .and_then(|n| n.as_array())
         .unwrap_or(&empty);
     for top in tops {
-        w.walk(top, None, serde_json::json!({}), None);
+        w.walk(top, None, &EMPTY_RECT, None);
     }
     let mut all_ids = HashSet::new();
     collect_all_ids(&tree, &mut all_ids);
     let mut out = Vec::with_capacity(w.found.len());
-    for mut t in w.found {
+    for (mut t, ws) in w.found {
         let mut below: Vec<BelowEntry> = w
             .ws_leaves
-            .get(&t.ws_id)
+            .get(&ws)
             .map(|v| v.iter().filter(|e| e.0 != t.con_id).cloned().collect())
             .unwrap_or_default();
-        below.sort();
+        // Tuples with unique con_ids: stability buys nothing.
+        below.sort_unstable();
         t.below = below;
         out.push(t);
     }

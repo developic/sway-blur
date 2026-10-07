@@ -379,26 +379,67 @@ impl Capturer {
 
         self.wait_frame(deadline, "frame copy", |f| f.ready)?;
 
-        // Convert wire pixels (native-endian xRGB) to RGBA.
-        let is_argb = format == wl_shm::Format::Argb8888;
-        let is_abgr = format == wl_shm::Format::Abgr8888;
+        // Convert wire pixels (native-endian xRGB) to RGBA. One loop
+        // per format: no per-pixel branch over millions of pixels.
         let mut rgba = vec![0u8; fw as usize * fh as usize * 4];
-        for y in 0..fh as usize {
-            let src_row = &mmap[y * stride as usize..][..fw as usize * 4];
-            let dst_row = &mut rgba[y * fw as usize * 4..][..fw as usize * 4];
-            let (src_px, _) = src_row.as_chunks::<4>();
-            let (dst_px, _) = dst_row.as_chunks_mut::<4>();
-            for (s, d) in src_px.iter().zip(dst_px.iter_mut()) {
-                if is_argb || format == wl_shm::Format::Xrgb8888 {
-                    d[0] = s[2];
-                    d[1] = s[1];
-                    d[2] = s[0];
-                    d[3] = if is_argb { s[3] } else { 255 };
-                } else {
-                    d[0] = s[0];
-                    d[1] = s[1];
-                    d[2] = s[2];
-                    d[3] = if is_abgr { s[3] } else { 255 };
+        let row = fw as usize * 4;
+        let stride_usz = stride as usize;
+        match format {
+            wl_shm::Format::Argb8888 => {
+                for y in 0..fh as usize {
+                    let src_row = &mmap[y * stride_usz..][..row];
+                    let dst_row = &mut rgba[y * row..][..row];
+                    let (src_px, _) = src_row.as_chunks::<4>();
+                    let (dst_px, _) = dst_row.as_chunks_mut::<4>();
+                    for (s, d) in src_px.iter().zip(dst_px.iter_mut()) {
+                        d[0] = s[2];
+                        d[1] = s[1];
+                        d[2] = s[0];
+                        d[3] = s[3];
+                    }
+                }
+            }
+            wl_shm::Format::Xrgb8888 => {
+                for y in 0..fh as usize {
+                    let src_row = &mmap[y * stride_usz..][..row];
+                    let dst_row = &mut rgba[y * row..][..row];
+                    let (src_px, _) = src_row.as_chunks::<4>();
+                    let (dst_px, _) = dst_row.as_chunks_mut::<4>();
+                    for (s, d) in src_px.iter().zip(dst_px.iter_mut()) {
+                        d[0] = s[2];
+                        d[1] = s[1];
+                        d[2] = s[0];
+                        d[3] = 255;
+                    }
+                }
+            }
+            wl_shm::Format::Abgr8888 => {
+                for y in 0..fh as usize {
+                    let src_row = &mmap[y * stride_usz..][..row];
+                    let dst_row = &mut rgba[y * row..][..row];
+                    let (src_px, _) = src_row.as_chunks::<4>();
+                    let (dst_px, _) = dst_row.as_chunks_mut::<4>();
+                    for (s, d) in src_px.iter().zip(dst_px.iter_mut()) {
+                        d[0] = s[0];
+                        d[1] = s[1];
+                        d[2] = s[2];
+                        d[3] = s[3];
+                    }
+                }
+            }
+            _ => {
+                debug_assert_eq!(format, wl_shm::Format::Xbgr8888);
+                for y in 0..fh as usize {
+                    let src_row = &mmap[y * stride_usz..][..row];
+                    let dst_row = &mut rgba[y * row..][..row];
+                    let (src_px, _) = src_row.as_chunks::<4>();
+                    let (dst_px, _) = dst_row.as_chunks_mut::<4>();
+                    for (s, d) in src_px.iter().zip(dst_px.iter_mut()) {
+                        d[0] = s[0];
+                        d[1] = s[1];
+                        d[2] = s[2];
+                        d[3] = 255;
+                    }
                 }
             }
         }

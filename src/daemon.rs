@@ -36,6 +36,23 @@ impl Cache {
     }
 
     /// Hit clones pixels and refreshes recency; stale rect/output/below misses.
+    /// `touch` is the clone-free check used for the steady-state fast path:
+    /// same freshness test + same recency update as `get_for`, minus the
+    /// multi-MB pixel clone.
+    fn touch(&mut self, t: &Term) -> bool {
+        let fresh = match self.map.get(&t.con_id) {
+            Some(hit) => hit.output == t.output && hit.rect == t.rect && hit.below == t.below,
+            None => false,
+        };
+        if fresh {
+            if let Some(pos) = self.order.iter().position(|&id| id == t.con_id) {
+                self.order.remove(pos);
+                self.order.push_back(t.con_id);
+            }
+        }
+        fresh
+    }
+
     fn get_for(&mut self, t: &Term) -> Option<RgbaImage> {
         let hit = self.map.get(&t.con_id)?;
         if hit.output != t.output || hit.rect != t.rect || hit.below != t.below {
@@ -70,8 +87,8 @@ impl Cache {
     }
 
     /// Drop snapshots for cons that no longer exist anywhere in the sway
-    /// tree (closed windows). Hidden-workspace cons still exist, so their
-    /// snapshots survive for instant switch-back. Returns evicted count.
+    /// tree (closed windows). Hidden-workspace cons still exist, so
+    /// switching back needs no recapture. Returns evicted count.
     fn prune_closed(&mut self, alive: &HashSet<i64>) -> usize {
         let dead: Vec<i64> = self
             .map
@@ -118,6 +135,20 @@ impl PendingShow {
             pixels: img.clone().into_raw(),
             width: img.width() as i32,
             height: img.height() as i32,
+            rect,
+            out_rect,
+        }
+    }
+
+    /// Owned variant: no clone, `img` becomes the pixel buffer. Use when
+    /// the caller has an owned frame and clones once for the other owner.
+    fn of_owned(key: (String, i64), img: RgbaImage, rect: Rect, out_rect: OutRect) -> Self {
+        let (width, height) = (img.width() as i32, img.height() as i32);
+        Self {
+            key,
+            pixels: img.into_raw(),
+            width,
+            height,
             rect,
             out_rect,
         }
@@ -180,14 +211,16 @@ impl Daemon {
                 None
             }
             Ok(img) => {
-                lock(&shared.cache).put(t, img.clone(), shared.config.cache_max);
+                // Overlay gets a copy of the bytes; the cache keeps the frame.
                 let r = t.rect;
+                let show = PendingShow::of_owned(t.key(), img.clone(), r, out_rect);
+                lock(&shared.cache).put(t, img, shared.config.cache_max);
                 println!(
                     "[daemon] SHOW {}#{} @{},{} {}x{}",
                     t.app_id, t.con_id, r.x, r.y, r.width, r.height
                 );
                 flush();
-                Some(PendingShow::of(t.key(), &img, r, out_rect))
+                Some(show)
             }
         }
     }
@@ -219,7 +252,16 @@ impl Daemon {
             }
             return;
         }
-        // Snapshot cache lookup.
+        // Steady state: skip the pixel clones when nothing needs showing.
+        let keys_now: HashSet<(String, i64)> = terms.iter().map(|t| t.key()).collect();
+        if keys_now == *lock(&shared.live_keys) {
+            let mut cache = lock(&shared.cache);
+            if terms.iter().all(|t| cache.touch(t)) {
+                // Nothing changed: stay silent.
+                return;
+            }
+        }
+        // Snapshot cache lookup (clones only on the non-steady path).
         let jobs: Vec<(Term, Option<RgbaImage>)> = {
             let mut cache = lock(&shared.cache);
             terms
@@ -230,11 +272,6 @@ impl Daemon {
                 })
                 .collect()
         };
-        let keys_now: HashSet<(String, i64)> = jobs.iter().map(|(t, _)| t.key()).collect();
-        if jobs.iter().all(|(_, img)| img.is_some()) && keys_now == *lock(&shared.live_keys) {
-            // Nothing changed: stay silent.
-            return;
-        }
         let cached = jobs.iter().filter(|(_, p)| p.is_some()).count();
         println!(
             "[daemon] refresh: {} terminals, {cached} cached",
@@ -249,12 +286,15 @@ impl Daemon {
             // hide presents before capture
             thread::sleep(Duration::from_secs_f64(shared.config.hide_settle_s));
         }
-        let outputs = lock(&shared.outputs).clone();
         let mut pending: Vec<PendingShow> = Vec::with_capacity(jobs.len());
         let mut live_keys = Vec::with_capacity(jobs.len());
         for (t, cached_img) in &jobs {
             live_keys.push(t.key());
-            let out_rect = outputs.get(&t.output).cloned().unwrap_or_default();
+            // Short lock per window instead of cloning the whole output map.
+            let out_rect = lock(&shared.outputs)
+                .get(&t.output)
+                .cloned()
+                .unwrap_or_default();
             match cached_img {
                 Some(img) => pending.push(PendingShow::of(t.key(), img, t.rect, out_rect)),
                 None => {
@@ -274,8 +314,10 @@ impl Daemon {
                 show.out_rect,
             );
         }
-        overlay.prune(live_keys.iter().cloned().collect());
-        *lock(&shared.live_keys) = live_keys.into_iter().collect();
+        // Build the live set once; the overlay message takes a copy.
+        let live_set: HashSet<(String, i64)> = live_keys.into_iter().collect();
+        overlay.prune(live_set.clone());
+        *lock(&shared.live_keys) = live_set;
     }
 
     fn worker_loop(shared: Arc<Shared>) {

@@ -145,7 +145,7 @@ impl Overlay {
             .collect();
         for k in dead {
             if let Some(entry) = self.windows.remove(&k) {
-                // SAFETY: called on the GTK thread via idle_add.
+                // SAFETY: runs on the GTK thread.
                 unsafe { entry.win.destroy() };
             }
         }

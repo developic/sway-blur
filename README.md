@@ -23,7 +23,7 @@
 ## Features
 
 - Blur
-- Easy to config
+- Easy to configure
 
 ## Quick Start
 
@@ -40,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/developic/sway-blur/main/install.sh
 - GTK 3, gtk-layer-shell
 - Rust toolchain
 
-### Install
+### Build and install
 
 ```bash
 cargo build --release

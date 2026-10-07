@@ -4,7 +4,14 @@ use crate::model::{OutRect, Rect};
 use crate::screencopy;
 use fast_image_resize as fir;
 use image::RgbaImage;
+use std::cell::RefCell;
 use std::time::{Duration, Instant};
+
+// Reused across resizes on this thread: keeps convolution buffers alive
+// instead of reallocating them twice per capture.
+thread_local! {
+    static RESIZER: RefCell<fir::Resizer> = RefCell::new(fir::Resizer::new());
+}
 
 #[derive(Debug)]
 pub struct CaptureError(pub String);
@@ -28,23 +35,19 @@ pub fn capture_region(
 }
 
 /// SIMD Bilinear RGBA resize. Blurred right after/before, so it matches
-/// Triangle at a fraction of the cost.
+/// Triangle at a fraction of the cost. Zero-copy on the source side:
+/// `RgbaImage` is viewed directly (no `to_vec` clone); only the
+/// destination allocates, which is unavoidable.
 fn resize_rgba(src: &RgbaImage, dw: u32, dh: u32) -> RgbaImage {
-    let src_img = fir::images::Image::from_vec_u8(
-        src.width(),
-        src.height(),
-        src.as_raw().to_vec(),
-        fir::PixelType::U8x4,
-    )
-    .expect("src dimensions are valid");
-    let mut dst_img = fir::images::Image::new(dw, dh, fir::PixelType::U8x4);
-    let mut resizer = fir::Resizer::new();
+    let mut dst = RgbaImage::new(dw, dh);
     let opts = fir::ResizeOptions::new()
         .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::Bilinear));
-    resizer
-        .resize(&src_img, &mut dst_img, &opts)
-        .expect("dst dimensions are valid");
-    RgbaImage::from_raw(dw, dh, dst_img.into_vec()).expect("fir output size matches")
+    RESIZER.with(|r| {
+        r.borrow_mut()
+            .resize(src, &mut dst, &opts)
+            .expect("dst dimensions are valid")
+    });
+    dst
 }
 
 /// Blur, pure Rust: downscale -> gaussian blur -> upscale -> optional
@@ -57,13 +60,15 @@ pub fn blur_image(cropped: &RgbaImage, config: &Config) -> RgbaImage {
     let blurred: RgbaImage = image::imageops::fast_blur(&small, config.blur as f32);
     let mut big = resize_rgba(&blurred, w, h);
 
-    // Optional dark tint (keep = 1.0 means none).
+    // Optional dark tint (keep = 1.0 means none). LUT: one float
+    // mult per level instead of per channel per pixel.
     let keep = ((100.0 - config.tint) / 100.0) as f32;
     if keep < 1.0 {
+        let lut: [u8; 256] = std::array::from_fn(|i| (i as f32 * keep).clamp(0.0, 255.0) as u8);
         for px in big.pixels_mut() {
-            for i in 0..3 {
-                px[i] = (px[i] as f32 * keep).clamp(0.0, 255.0) as u8;
-            }
+            px[0] = lut[px[0] as usize];
+            px[1] = lut[px[1] as usize];
+            px[2] = lut[px[2] as usize];
         }
     }
 
