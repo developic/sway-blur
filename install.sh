@@ -8,27 +8,88 @@ REPO="developic/sway-blur"
 BIN="sway-blur"
 BINDIR="/usr/local/bin"
 
+# ── UI kit: headers, status lines, progress bar ─────────────────────────────────
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]; then
-  BLD="$(printf '\033[1m')"
-  DIM="$(printf '\033[2m')"
-  CYAN="$(printf '\033[36m')"
-  GREEN="$(printf '\033[32m')"
-  YELLOW="$(printf '\033[33m')"
-  RED="$(printf '\033[31m')"
-  RESET="$(printf '\033[0m')"
+  RST="$(printf '\033[0m')"; DIM="$(printf '\033[2m')"; BLD="$(printf '\033[1m')"
+  GRN="$(printf '\033[32m')"; YEL="$(printf '\033[33m')"; RED="$(printf '\033[31m')"
+  CYA="$(printf '\033[36m')"
 else
-  BLD='' DIM='' CYAN='' GREEN='' YELLOW='' RED='' RESET=''
+  RST=''; DIM=''; BLD=''; GRN=''; YEL=''; RED=''; CYA=''
 fi
+TICK='✓'; ARROW='→'; HBAR='─'; BARW=20
 
-stage() { printf '%s[+]%s %s\n' "$CYAN" "$RESET" "$*"; }
-ok() { printf '%s[✓]%s %s\n' "$GREEN" "$RESET" "$*"; }
-skip() { printf '%s[-]%s %s\n' "$DIM" "$RESET" "$*"; }
-warn() { printf '%s[!]%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
-die() { printf '%s[!] error: %s%s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+ok()   { printf '  %s[ ok ]%s %s\n' "$GRN" "$RST" "${1:-}"; }
+skip() { printf '  %s[ -- ]%s %s\n' "$DIM" "$RST" "${1:-}"; }
+warn() { printf '  %s[warn]%s %s\n' "$YEL" "$RST" "${1:-}" >&2; }
+die()  { printf '  %s[fail]%s %s\n' "$RED" "$RST" "${1:-fatal error}"; exit 1; }
+header() { printf '\n  %s%s[%s/%s]%s %s\n' "$BLD" "$CYA" "${1:-?}" "${2:-?}" "$RST" "${3:-}"; }
+human() {
+  _h_b=$(printf '%s' "${1:-0}" | tr -dc '0-9'); _h_b=${_h_b:-0}
+  awk -v b="$_h_b" 'BEGIN{ if(b<1024) printf "%d B", b; else if(b<1048576) printf "%.1f KB", b/1024; else printf "%.1f MB", b/1048576 }'
+}
 have() { command -v "$1" >/dev/null 2>&1; }
 
-have curl || die "curl is required"
-have tar || die "tar is required"
+# ── download animation: progress bar ──────────────────────────────────────────
+
+bar() { # bar <pct> → BARW-cell bar on stdout
+  _bar_pct=${1:-0}; _bar_done=$((_bar_pct * BARW / 100)); _bar_i=0; _bar_s=
+  while [ "$_bar_i" -lt "$BARW" ]; do
+    if [ "$_bar_i" -lt "$_bar_done" ]; then _bar_s="${_bar_s}${HBAR}"; else _bar_s="${_bar_s} "; fi
+    _bar_i=$((_bar_i + 1))
+  done
+  printf '%s' "$_bar_s"
+}
+
+fetch() { # fetch <url> <outfile> <label>
+  _f_url=${1:-}; _f_out=${2:-}; _f_label=${3:-download}
+  _f_total=$(curl -fsSIL --proto '=https' --tlsv1.2 --max-time 20 "$_f_url" 2>/dev/null \
+    | tr -d '\r' | sed -n 's/^[Cc]ontent-[Ll]ength: *//p' | tail -n 1 | tr -dc '0-9')
+  _f_total=${_f_total:-0}
+  : >"$_f_out"
+  curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 1 \
+    -w '%{size_download} %{speed_download}' \
+    -o "$_f_out" "$_f_url" >"$_f_out.metrics" 2>"$_f_out.err" &
+  _f_pid=$!
+  while kill -0 "$_f_pid" 2>/dev/null; do
+    _f_have=$(wc -c <"$_f_out" 2>/dev/null | tr -dc '0-9'); _f_have=${_f_have:-0}
+    _f_pct=0
+    if [ "$_f_total" -gt 0 ]; then
+      _f_pct=$((_f_have * 100 / _f_total))
+      if [ "$_f_pct" -gt 100 ]; then _f_pct=100; fi
+    fi
+    if [ "$_f_total" -gt 0 ]; then _f_ttotal=$(human "$_f_total"); else _f_ttotal="?"; fi
+    _f_bar=$(bar "$_f_pct"); _f_have_h=$(human "$_f_have")
+    printf '\r  %s %s%s%s %s%3d%%%s  %s/%s%s' \
+      "$_f_label" "$CYA" "$_f_bar" "$RST" "$DIM" "$_f_pct" "$RST" \
+      "$_f_have_h" "$_f_ttotal" "$RST"
+    sleep 0.1 2>/dev/null || true
+  done
+  _f_st=0
+  wait "$_f_pid" || _f_st=$?
+  printf '\r\033[K'
+  if [ "$_f_st" -ne 0 ]; then
+    tail -n 3 "$_f_out.err" 2>/dev/null >&2 || true
+    rm -f "$_f_out.metrics" "$_f_out.err" 2>/dev/null
+    die "download failed: $_f_url"
+  fi
+  _f_mz=0; _f_md=0
+  IFS=' ' read -r _f_mz _f_md <"$_f_out.metrics" 2>/dev/null || true   # curl -w has no trailing \n
+  _f_mz=$(printf '%s' "$_f_mz" | tr -dc '0-9'); _f_mz=${_f_mz:-0}
+  # %{speed_download} is float (bytes/sec); drop the fraction for arithmetic
+  _f_md=${_f_md%%.*}
+  _f_mk=$(printf '%s' "$_f_md" | tr -dc '0-9'); _f_mk=${_f_mk:-0}
+  _f_rate=$(awk -v k="$_f_mk" 'BEGIN{ if(k>=1048576) printf "%.1f MB/s", k/1048576; else if(k>=1024) printf "%.0f KB/s", k/1024; else printf "%d B/s", k }')
+  _f_full=$(bar 100); _f_size=$(human "$_f_mz")
+  printf '  %s %s%s%s %s%3d%%%s  %s  %s%s\n' \
+    "$_f_label" "$CYA" "$_f_full" "$RST" "$GRN" 100 "$RST" \
+    "$_f_rate" "$GRN" "$_f_size$RST"
+  rm -f "$_f_out.metrics" "$_f_out.err" 2>/dev/null
+}
+
+# ── startup standards: fail fast before doing anything ─────────────────────────
+# Only tar/xz are checked: curl got us here, the rest ships with every distro.
+have tar || die "missing required command: tar"
+have xz || die "missing required command: xz (needed to extract .tar.xz releases)"
 
 printf '%s' "$BLD"
 cat <<'EOF'
@@ -38,15 +99,15 @@ cat <<'EOF'
   ___) |\ V  V / (_| | |_| || |_) | | |_| |
  |____/  \_/\_/ \__,_|\__,_||_.__/|_|\__,_|
 EOF
-printf '%s' "$RESET"
-printf '%ssway-blur installer%s\n\n' "$DIM" "$RESET"
+printf '%s' "$RST"
+printf '%ssway-blur installer%s\n\n' "$DIM" "$RST"
 
 SUDO=
 if [ "$(id -u)" != "0" ] && have sudo; then
   SUDO=sudo
 fi
 
-stage "[1/3] System libraries"
+header 1 3 "System libraries"
 if have apt-get; then
   MISSING=
   for p in libglib2.0-0 libgtk-3-0 libgtk-layer-shell0; do
@@ -87,31 +148,42 @@ else
   warn "no supported package manager; install GTK3 + gtk-layer-shell manually"
 fi
 
-case "$(uname -m)" in
-  x86_64 | amd64) ARCH="x86_64" ;;
-  aarch64 | arm64) ARCH="aarch64" ;;
-  *) die "unsupported architecture: $(uname -m) (need x86_64 or aarch64)" ;;
+_m=$(uname -m)
+case "$_m" in
+  x86_64) ARCH="x86_64" ;;
+  aarch64) ARCH="aarch64" ;;
+  *) die "unsupported architecture: $_m (need x86_64 or aarch64)" ;;
 esac
 [ "$(uname -s)" = "Linux" ] || die "only Linux is supported"
 
-stage "[2/3] Download latest release"
+header 2 3 "Latest release"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
-cd "$TMP"
-curl -fsSL -o api.json "https://api.github.com/repos/${REPO}/releases/latest"
-VERSION="$(grep -m1 '"tag_name"' api.json | cut -d'"' -f4 | sed 's/^v//')"
-[ -n "$VERSION" ] || die "could not resolve latest release"
+# Latest tag via the releases/latest redirect — no API quota, no JSON parsing.
+TAG=""; VERSION=""
+_redir=$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+  --proto '=https' --tlsv1.2 --retry 2 --max-time 20 \
+  "https://github.com/${REPO}/releases/latest" 2>/dev/null) || _redir=""
+case "$_redir" in
+  */tag/*)
+    TAG=${_redir##*/tag/}
+    TAG=${TAG%%\?*}
+    TAG=${TAG%/}
+    ;;
+esac
+VERSION=${TAG#v}
+[ -n "$VERSION" ] || die "could not resolve latest release — check the network"
+ok "latest release: $TAG"
 
 TARBALL="${BIN}-${VERSION}-linux-${ARCH}.tar.xz"
-BASE_URL="https://github.com/${REPO}/releases/download/v${VERSION}"
-curl -fsSL -o "$TARBALL" "${BASE_URL}/${TARBALL}"
-curl -fsSL -o "${TARBALL}.sha256" "${BASE_URL}/${TARBALL}.sha256"
-sha256sum -c "${TARBALL}.sha256" >/dev/null && ok "${TARBALL} (checksum ok)"
+fetch "https://github.com/${REPO}/releases/download/${TAG}/${TARBALL}" "${TMP}/${TARBALL}" "$TARBALL"
 
-stage "[3/3] Install"
-tar -xJf "$TARBALL" -C "$TMP"
+header 3 3 "Install"
+tar -xJf "${TMP}/${TARBALL}" -C "$TMP"
 $SUDO install -m 0755 "${TMP}/${BIN}" "${BINDIR}/${BIN}"
 ok "${BINDIR}/${BIN} (v${VERSION})"
 
-printf '\n%ssway-blur v%s ready — run: %s%s\n' "$GREEN" "$VERSION" "$BIN" "$RESET"
-printf '%sautostart: exec_always %s/%s%s\n' "$DIM" "$BINDIR" "$BIN" "$RESET"
+printf '\n  %s%s%s  %s%s v%s%s\n' "$GRN" "$TICK" "$RST" "$BLD" "$BIN" "$VERSION" "$RST"
+printf '  %s  run %s%s%s to start the daemon in this session\n' "$ARROW" "$CYA" "$BIN" "$RST"
+printf '  %s  add %sexec_always %s/%s%s to your sway config to autostart\n' "$ARROW" "$CYA" "$BINDIR" "$BIN" "$RST"
+printf '  %s  binary lives at %s%s/%s%s\n' "$ARROW" "$CYA" "$BINDIR" "$BIN" "$RST"

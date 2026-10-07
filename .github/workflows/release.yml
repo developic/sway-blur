@@ -81,13 +81,12 @@ jobs:
           cp README.md LICENSE config.example.toml pkg/
           TARBALL="sway-blur-${VERSION}-linux-${ARCH}.tar.xz"
           tar -cJf "${TARBALL}" -C pkg sway-blur README.md LICENSE config.example.toml
-          sha256sum "${TARBALL}" | tee "${TARBALL}.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.target }}
-          path: "*.tar.xz*"
+          path: "*.tar.xz"
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
@@ -133,6 +132,6 @@ jobs:
           make_latest: true
           generate_release_notes: true
           fail_on_unmatched_files: true
-          files: dist/*.tar.xz*
+          files: dist/*.tar.xz
           name: v${{ steps.get_version.outputs.value }}
           tag_name: v${{ steps.get_version.outputs.value }}
