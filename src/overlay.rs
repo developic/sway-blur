@@ -1,4 +1,4 @@
-use crate::model::{OutRect, Rect, SurfaceKey};
+use crate::model::{OutRect, Pixels, Rect, SurfaceKey};
 use gdk::prelude::*;
 use gtk::prelude::*;
 use gtk_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
@@ -106,8 +106,8 @@ impl Overlay {
         entry.win.set_size_request(rect.width, rect.height);
         match pixels {
             Some(pixels) => {
-                // Bytes copies the frame; the pixbuf then references it.
-                let bytes = glib::Bytes::from(pixels.as_slice());
+                // from_bytes keeps a ref to Bytes; Bytes owns the shared buffer.
+                let bytes = glib::Bytes::from_owned(pixels);
                 let pixbuf = gdk_pixbuf::Pixbuf::from_bytes(
                     &bytes,
                     gdk_pixbuf::Colorspace::Rgb,
@@ -161,7 +161,7 @@ impl Overlay {
 /// One terminal's finished frame, posted to the GTK thread.
 pub struct Frame {
     pub key: SurfaceKey,
-    pub pixels: Option<Vec<u8>>,
+    pub pixels: Option<Pixels>,
     pub width: i32,
     pub height: i32,
     pub rect: Rect,

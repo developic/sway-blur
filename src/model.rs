@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::sync::Arc;
 
 /// sway container id. Unique for the session; distinct from workspace ids.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -77,6 +78,30 @@ impl Term {
 pub struct SurfaceKey {
     pub output: String,
     pub con_id: ConId,
+}
+
+/// Shared raw RGBA pixels. Cloning is cheap; the buffer is allocated once.
+#[derive(Clone)]
+pub struct Pixels(Arc<Vec<u8>>);
+
+impl Pixels {
+    pub fn new(data: Vec<u8>) -> Self {
+        Self(Arc::new(data))
+    }
+}
+
+impl AsRef<[u8]> for Pixels {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Pixels {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pixels")
+            .field("len", &self.0.len())
+            .finish()
+    }
 }
 
 /// Output geometry from sway GET_OUTPUTS.

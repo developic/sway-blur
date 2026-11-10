@@ -1,7 +1,7 @@
 use crate::capture::{self, CaptureError};
 use crate::config::Config;
 use crate::ipc;
-use crate::model::{ConId, OutRect, SurfaceKey, Term};
+use crate::model::{ConId, OutRect, Pixels, SurfaceKey, Term};
 use crate::overlay::{Frame, OverlayHandle};
 use crate::tree;
 use crate::watcher::Watcher;
@@ -23,13 +23,13 @@ fn flush() {
 
 struct Snapshot {
     term: Term,
-    pixels: Vec<u8>,
+    pixels: Pixels,
     width: u32,
     height: u32,
 }
 
 struct CachedFrame {
-    pixels: Vec<u8>,
+    pixels: Pixels,
     width: u32,
     height: u32,
 }
@@ -74,7 +74,7 @@ impl Cache {
         })
     }
 
-    fn put(&mut self, t: &Term, pixels: Vec<u8>, width: u32, height: u32, max: usize) {
+    fn put(&mut self, t: &Term, pixels: Pixels, width: u32, height: u32, max: usize) {
         let existed = self.map.contains_key(&t.con_id);
         self.map.insert(
             t.con_id,
@@ -214,7 +214,7 @@ impl Daemon {
         shared: &Arc<Shared>,
         t: &Term,
         out_rect: OutRect,
-    ) -> Option<(Vec<u8>, u32, u32)> {
+    ) -> Option<(Pixels, u32, u32)> {
         match capture::capture_and_blur(&t.rect, &shared.config, t.con_id.0, &t.output, &out_rect) {
             Err(CaptureError(msg)) => {
                 println!(
@@ -226,7 +226,7 @@ impl Daemon {
             }
             Ok(img) => {
                 let (width, height) = img.dimensions();
-                let pixels = img.into_raw();
+                let pixels = Pixels::new(img.into_raw());
                 println!(
                     "[daemon] SHOW {}#{} @{},{} {}x{}",
                     t.app_id, t.con_id, t.rect.x, t.rect.y, t.rect.width, t.rect.height
@@ -293,7 +293,7 @@ impl Daemon {
         }
 
         let mut frames: Vec<Frame> = Vec::with_capacity(jobs.len());
-        let mut new_snapshots: Vec<(Term, Vec<u8>, u32, u32)> = Vec::new();
+        let mut new_snapshots: Vec<(Term, Pixels, u32, u32)> = Vec::new();
         for job in jobs {
             // Short lock per window instead of cloning the whole output map.
             let out_rect = lock(&shared.outputs)
@@ -462,8 +462,8 @@ mod tests {
         }
     }
 
-    fn px(marker: u8) -> Vec<u8> {
-        vec![marker; 4]
+    fn px(marker: u8) -> Pixels {
+        Pixels::new(vec![marker; 4])
     }
 
     #[test]
