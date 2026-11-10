@@ -41,25 +41,6 @@ impl Node {
     }
 }
 
-/// Reject fully off-screen windows; translate into output-local coordinates.
-fn rect_on_output(rect: &Rect, out: &Rect) -> Option<Rect> {
-    if rect.width < 2
-        || rect.height < 2
-        || rect.x >= out.x + out.width
-        || rect.y >= out.y + out.height
-        || rect.x + rect.width <= out.x
-        || rect.y + rect.height <= out.y
-    {
-        return None;
-    }
-    Some(Rect {
-        x: rect.x - out.x,
-        y: rect.y - out.y,
-        width: rect.width,
-        height: rect.height,
-    })
-}
-
 struct Walker<'a> {
     allow: &'a HashSet<String>,
     found: Vec<(Term, i64)>,
@@ -107,7 +88,7 @@ impl<'a> Walker<'a> {
                 self.all_ids.insert(id);
                 if !hidden && node.is_eligible() {
                     if let (Some(rect), Some(out), Some(ws)) = (node.rect, out_rect, ws_id) {
-                        if let Some(visible) = rect_on_output(&rect, &out) {
+                        if let Some(visible) = rect.intersection(&out) {
                             self.ws_leaves
                                 .entry(ws)
                                 .or_default()
@@ -187,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_typed_tree_fields() {
+    fn clips_terms_to_output_and_collects_below() {
         let tree = parse(
             r#"{
               "type":"root","nodes":[
@@ -195,7 +176,9 @@ mod tests {
                  "nodes":[
                    {"type":"workspace","id":7,"nodes":[
                      {"type":"con","id":1,"pid":10,"app_id":"foot","visible":true,"fullscreen_mode":0,
-                      "rect":{"x":10,"y":5,"width":50,"height":40}}
+                      "rect":{"x":-10,"y":0,"width":60,"height":40}},
+                     {"type":"con","id":2,"pid":11,"app_id":"other","visible":true,"fullscreen_mode":0,
+                      "rect":{"x":20,"y":10,"width":30,"height":30}}
                    ]}
                  ]}
               ]}"#,
@@ -209,14 +192,15 @@ mod tests {
         assert_eq!(
             terms[0].rect,
             Rect {
-                x: 10,
-                y: 5,
+                x: 0,
+                y: 0,
                 width: 50,
                 height: 40
             }
         );
-        assert!(terms[0].below.is_empty());
+        assert_eq!(terms[0].below, vec![(2, (20, 10, 30, 30))]);
         assert!(ids.contains(&1));
+        assert!(ids.contains(&2));
     }
 
     #[test]

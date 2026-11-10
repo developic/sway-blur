@@ -14,6 +14,24 @@ impl Rect {
     pub fn geometry(&self) -> String {
         format!("{},{} {}x{}", self.x, self.y, self.width, self.height)
     }
+
+    /// Visible part of `self` inside `outer`, translated into outer-local
+    /// coordinates. None when the intersection is smaller than 2x2.
+    pub fn intersection(&self, outer: &Rect) -> Option<Rect> {
+        let x1 = self.x.max(outer.x);
+        let y1 = self.y.max(outer.y);
+        let x2 = (self.x + self.width).min(outer.x + outer.width);
+        let y2 = (self.y + self.height).min(outer.y + outer.height);
+        if x2 - x1 < 2 || y2 - y1 < 2 {
+            return None;
+        }
+        Some(Rect {
+            x: x1 - outer.x,
+            y: y1 - outer.y,
+            width: x2 - x1,
+            height: y2 - y1,
+        })
+    }
 }
 
 /// con id + (x, y, w, h). Shared by Term.below, Snapshot.below, tree walk.
