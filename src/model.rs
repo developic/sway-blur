@@ -1,7 +1,8 @@
 use image::RgbaImage;
+use serde::Deserialize;
 
 /// Geometry + window types. Pixels stay raw RgbaImage end to end (no PNG roundtrip).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
