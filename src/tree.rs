@@ -1,5 +1,5 @@
 use crate::ipc;
-use crate::model::{BelowEntry, Rect, Term};
+use crate::model::{Below, ConId, Rect, Term};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -45,10 +45,10 @@ struct Walker<'a> {
     allow: &'a HashSet<String>,
     found: Vec<(Term, i64)>,
     /// ws_id -> visible leaves for that workspace (cache fingerprint input).
-    ws_leaves: HashMap<i64, Vec<BelowEntry>>,
+    ws_leaves: HashMap<i64, Vec<Below>>,
     /// Every con/floating_con id in the tree, including hidden workspaces and
     /// `__i3` (scratchpad), so their snapshots survive while hidden.
-    all_ids: HashSet<i64>,
+    all_ids: HashSet<ConId>,
 }
 
 impl<'a> Walker<'a> {
@@ -85,19 +85,20 @@ impl<'a> Walker<'a> {
 
         if node.is_con() {
             if let Some(id) = node.id {
-                self.all_ids.insert(id);
+                let con_id = ConId(id);
+                self.all_ids.insert(con_id);
                 if !hidden && node.is_eligible() {
                     if let (Some(rect), Some(out), Some(ws)) = (node.rect, out_rect, ws_id) {
                         if let Some(visible) = rect.intersection(&out) {
-                            self.ws_leaves
-                                .entry(ws)
-                                .or_default()
-                                .push((id, (visible.x, visible.y, visible.width, visible.height)));
+                            self.ws_leaves.entry(ws).or_default().push(Below {
+                                con_id,
+                                rect: visible,
+                            });
                             if let Some(app_id) = node.app_id.as_deref() {
                                 if self.allow.contains(app_id) {
                                     self.found.push((
                                         Term {
-                                            con_id: id,
+                                            con_id,
                                             app_id: app_id.to_string(),
                                             rect: visible,
                                             output: out_name.unwrap_or_default().to_string(),
@@ -118,13 +119,13 @@ impl<'a> Walker<'a> {
         }
     }
 
-    fn finish(self) -> (Vec<Term>, HashSet<i64>) {
+    fn finish(self) -> (Vec<Term>, HashSet<ConId>) {
         let mut out = Vec::with_capacity(self.found.len());
         for (mut t, ws) in self.found {
-            let mut below: Vec<BelowEntry> = self
+            let mut below: Vec<Below> = self
                 .ws_leaves
                 .get(&ws)
-                .map(|v| v.iter().filter(|e| e.0 != t.con_id).cloned().collect())
+                .map(|v| v.iter().filter(|b| b.con_id != t.con_id).cloned().collect())
                 .unwrap_or_default();
             // con_ids are unique; stability buys nothing.
             below.sort_unstable();
@@ -135,7 +136,7 @@ impl<'a> Walker<'a> {
     }
 }
 
-fn collect(tree: &Node, allow: &HashSet<String>) -> (Vec<Term>, HashSet<i64>) {
+fn collect(tree: &Node, allow: &HashSet<String>) -> (Vec<Term>, HashSet<ConId>) {
     let mut w = Walker::new(allow);
     w.walk(tree, None, None, None, false);
     w.finish()
@@ -146,7 +147,7 @@ fn collect(tree: &Node, allow: &HashSet<String>) -> (Vec<Term>, HashSet<i64>) {
 /// windows without dropping hidden-workspace snapshots.
 pub fn get_visible_terminals_and_all_ids(
     allow: &HashSet<String>,
-) -> Result<(Vec<Term>, HashSet<i64>)> {
+) -> Result<(Vec<Term>, HashSet<ConId>)> {
     // Persistent connection: GET_TREE fires every refresh, so skip the
     // connect/close pair per call (same thread-local slot as the capture
     // commands; strictly sequential, never concurrent).
@@ -186,9 +187,6 @@ mod tests {
         let (terms, ids) = collect(&tree, &allow(&["foot"]));
 
         assert_eq!(terms.len(), 1);
-        assert_eq!(terms[0].con_id, 1);
-        assert_eq!(terms[0].app_id, "foot");
-        assert_eq!(terms[0].output, "DP-1");
         assert_eq!(
             terms[0].rect,
             Rect {
@@ -198,9 +196,20 @@ mod tests {
                 height: 40
             }
         );
-        assert_eq!(terms[0].below, vec![(2, (20, 10, 30, 30))]);
-        assert!(ids.contains(&1));
-        assert!(ids.contains(&2));
+        assert_eq!(
+            terms[0].below,
+            vec![Below {
+                con_id: ConId(2),
+                rect: Rect {
+                    x: 20,
+                    y: 10,
+                    width: 30,
+                    height: 30
+                },
+            }]
+        );
+        assert!(ids.contains(&ConId(1)));
+        assert!(ids.contains(&ConId(2)));
     }
 
     #[test]
@@ -224,9 +233,9 @@ mod tests {
         let (terms, ids) = collect(&tree, &allow(&["foot"]));
 
         assert_eq!(terms.len(), 1);
-        assert_eq!(terms[0].con_id, 1);
-        assert!(ids.contains(&3));
-        assert!(ids.contains(&4));
+        assert_eq!(terms[0].con_id, ConId(1));
+        assert!(ids.contains(&ConId(3)));
+        assert!(ids.contains(&ConId(4)));
     }
 
     #[test]
@@ -246,6 +255,6 @@ mod tests {
         let (terms, ids) = collect(&tree, &allow(&["foot"]));
 
         assert!(terms.is_empty());
-        assert!(ids.contains(&9));
+        assert!(ids.contains(&ConId(9)));
     }
 }

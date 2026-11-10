@@ -1,4 +1,4 @@
-use crate::model::{OutRect, Rect};
+use crate::model::{OutRect, Rect, SurfaceKey};
 use gdk::prelude::*;
 use gtk::prelude::*;
 use gtk_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
@@ -12,7 +12,7 @@ struct Entry {
 /// Bottom-layer surfaces showing blurred snapshots. Lives on the GTK thread;
 /// workers drive it through [`OverlayHandle`] messages.
 struct Overlay {
-    windows: HashMap<(String, i64), Entry>,
+    windows: HashMap<SurfaceKey, Entry>,
 }
 
 impl Overlay {
@@ -52,7 +52,7 @@ impl Overlay {
         }
     }
 
-    fn get_or_create_window(&mut self, key: &(String, i64), out_rect: &OutRect) -> &Entry {
+    fn get_or_create_window(&mut self, key: &SurfaceKey, out_rect: &OutRect) -> &mut Entry {
         if !self.windows.contains_key(key) {
             let win = gtk::Window::new(gtk::WindowType::Toplevel);
             win.set_decorated(false);
@@ -77,56 +77,51 @@ impl Overlay {
             }
             self.windows.insert(key.clone(), Entry { win, img });
         }
-        &self.windows[key]
+        self.windows.get_mut(key).expect("window was just inserted")
     }
 
     // -- GTK-thread-only primitives -------------------------------------
 
     fn apply(&mut self, msg: OverlayMsg) {
         match msg {
-            OverlayMsg::Show {
-                pixels,
-                width,
-                height,
-                key,
-                rect,
-                out_rect,
-            } => self.show(&pixels, width, height, key, &rect, &out_rect),
+            OverlayMsg::Sync(frames) => self.sync(frames),
             OverlayMsg::HideAll => self.hide_all(),
-            OverlayMsg::Prune { live } => self.prune(&live),
         }
     }
 
-    /// Show raw RGBA pixels at rect (output-local); one surface per (output, con_id).
-    fn show(
-        &mut self,
-        pixels: &[u8],
-        width: i32,
-        height: i32,
-        key: (String, i64),
-        rect: &Rect,
-        out_rect: &OutRect,
-    ) {
-        // Clone key fields before the mutable borrow below.
-        let entry = self.get_or_create_window(&key, out_rect);
-        let win = entry.win.clone();
-        let img = entry.img.clone();
-        win.set_layer_shell_margin(Edge::Top, rect.y);
-        win.set_layer_shell_margin(Edge::Left, rect.x);
-        win.set_size_request(rect.width, rect.height);
-        // from_bytes references (not copies) the bytes; they live until replaced.
-        let bytes = glib::Bytes::from(pixels);
-        let pixbuf = gdk_pixbuf::Pixbuf::from_bytes(
-            &bytes,
-            gdk_pixbuf::Colorspace::Rgb,
-            true,
-            8,
+    /// Show or hide one surface. `pixels: None` keeps the surface alive (for a
+    /// retry) but hidden; it never displays a stale frame.
+    fn show(&mut self, frame: Frame) {
+        let Frame {
+            key,
+            pixels,
             width,
             height,
-            width * 4,
-        );
-        img.set_from_pixbuf(Some(&pixbuf));
-        win.show_all();
+            rect,
+            out_rect,
+        } = frame;
+        let entry = self.get_or_create_window(&key, &out_rect);
+        entry.win.set_layer_shell_margin(Edge::Top, rect.y);
+        entry.win.set_layer_shell_margin(Edge::Left, rect.x);
+        entry.win.set_size_request(rect.width, rect.height);
+        match pixels {
+            Some(pixels) => {
+                // Bytes copies the frame; the pixbuf then references it.
+                let bytes = glib::Bytes::from(pixels.as_slice());
+                let pixbuf = gdk_pixbuf::Pixbuf::from_bytes(
+                    &bytes,
+                    gdk_pixbuf::Colorspace::Rgb,
+                    true,
+                    8,
+                    width,
+                    height,
+                    width * 4,
+                );
+                entry.img.set_from_pixbuf(Some(&pixbuf));
+                entry.win.show_all();
+            }
+            None => entry.win.hide(),
+        }
     }
 
     fn hide_all(&mut self) {
@@ -135,12 +130,21 @@ impl Overlay {
         }
     }
 
-    /// Destroy overlays for windows that are no longer visible.
-    fn prune(&mut self, live_keys: &HashSet<(String, i64)>) {
-        let dead: Vec<(String, i64)> = self
+    /// Apply a full desired frame set atomically: show/update everything, then
+    /// destroy surfaces that are no longer live.
+    fn sync(&mut self, frames: Vec<Frame>) {
+        let live: HashSet<SurfaceKey> = frames.iter().map(|f| f.key.clone()).collect();
+        for frame in frames {
+            self.show(frame);
+        }
+        self.prune(&live);
+    }
+
+    fn prune(&mut self, live: &HashSet<SurfaceKey>) {
+        let dead: Vec<SurfaceKey> = self
             .windows
             .keys()
-            .filter(|k| !live_keys.contains(*k))
+            .filter(|k| !live.contains(*k))
             .cloned()
             .collect();
         for k in dead {
@@ -154,20 +158,20 @@ impl Overlay {
 
 // -- cross-thread handle (lock-free channel; sends after shutdown fail silently) --
 
+/// One terminal's finished frame, posted to the GTK thread.
+pub struct Frame {
+    pub key: SurfaceKey,
+    pub pixels: Option<Vec<u8>>,
+    pub width: i32,
+    pub height: i32,
+    pub rect: Rect,
+    pub out_rect: OutRect,
+}
+
 /// Work the GTK thread performs for the daemon worker.
 pub enum OverlayMsg {
-    Show {
-        pixels: Vec<u8>,
-        width: i32,
-        height: i32,
-        key: (String, i64),
-        rect: Rect,
-        out_rect: OutRect,
-    },
     HideAll,
-    Prune {
-        live: HashSet<(String, i64)>,
-    },
+    Sync(Vec<Frame>),
 }
 
 /// Cloneable fire-and-forget handle the worker uses to drive the overlay.
@@ -189,30 +193,12 @@ impl OverlayHandle {
         Self { tx }
     }
 
-    pub fn show(
-        &self,
-        pixels: Vec<u8>,
-        width: i32,
-        height: i32,
-        key: (String, i64),
-        rect: Rect,
-        out_rect: OutRect,
-    ) {
-        let _ = self.tx.try_send(OverlayMsg::Show {
-            pixels,
-            width,
-            height,
-            key,
-            rect,
-            out_rect,
-        });
+    /// Apply the complete desired set of surfaces in one GTK-thread turn.
+    pub fn sync(&self, frames: Vec<Frame>) {
+        let _ = self.tx.try_send(OverlayMsg::Sync(frames));
     }
 
     pub fn hide_all(&self) {
         let _ = self.tx.try_send(OverlayMsg::HideAll);
-    }
-
-    pub fn prune(&self, live: HashSet<(String, i64)>) {
-        let _ = self.tx.try_send(OverlayMsg::Prune { live });
     }
 }

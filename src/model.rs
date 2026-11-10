@@ -1,8 +1,17 @@
-use image::RgbaImage;
 use serde::Deserialize;
 
-/// Geometry + window types. Pixels stay raw RgbaImage end to end (no PNG roundtrip).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+/// sway container id. Unique for the session; distinct from workspace ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ConId(pub i64);
+
+impl std::fmt::Display for ConId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Geometry. Rects are output-local unless noted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -34,33 +43,40 @@ impl Rect {
     }
 }
 
-/// con id + (x, y, w, h). Shared by Term.below, Snapshot.below, tree walk.
-pub type BelowEntry = (i64, (i32, i32, i32, i32));
+/// One visible window behind a terminal: id + output-local visible rect.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Below {
+    pub con_id: ConId,
+    pub rect: Rect,
+}
 
 /// One visible allowlisted window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Term {
-    pub con_id: i64,
+    pub con_id: ConId,
     pub app_id: String,
-    /// Output-local rect (screencopy crop space).
+    /// Visible part of the window on its output.
     pub rect: Rect,
     pub output: String,
     /// Every OTHER visible window on the same workspace (cache fingerprint).
-    pub below: Vec<BelowEntry>,
+    pub below: Vec<Below>,
 }
 
 impl Term {
-    pub fn key(&self) -> (String, i64) {
-        (self.output.clone(), self.con_id)
+    /// Overlay surface identity. A surface lives on one output; moving a
+    /// window to another output needs a new surface (monitor is set pre-map).
+    pub fn surface_key(&self) -> SurfaceKey {
+        SurfaceKey {
+            output: self.output.clone(),
+            con_id: self.con_id,
+        }
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Snapshot {
-    pub img: RgbaImage,
-    pub rect: Rect,
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SurfaceKey {
     pub output: String,
-    pub below: Vec<BelowEntry>,
+    pub con_id: ConId,
 }
 
 /// Output geometry from sway GET_OUTPUTS.
