@@ -1,6 +1,6 @@
 <h1 align="center">sway-blur</h1>
 <p align="center">
-  <strong>Snapshot blur overlay behind transparent windows on Sway</strong>
+  <strong>Snapshot based blur overlay behind  windows on Sway</strong>
   <br />
   <em>blur · rust</em>
 </p>
