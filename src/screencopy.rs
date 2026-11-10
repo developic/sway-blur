@@ -275,23 +275,13 @@ impl Capturer {
         }
     }
 
-    /// Capture an output-local `rect`: whole output via wlr-screencopy, cropped
-    /// in software. `fallback` (GET_OUTPUTS geometry) picks the `wl_output`
-    /// when xdg-output names are unavailable.
-    pub fn capture(
-        &mut self,
-        output_name: &str,
-        rect: &Rect,
-        fallback: &OutRect,
-    ) -> Result<RgbaImage> {
-        let deadline = Instant::now() + ROUNDTRIP_TIMEOUT;
-        // Drain stale events (e.g. wl_buffer Release from the last shot).
-        self.queue
-            .dispatch_pending(&mut self.state)
-            .context("Wayland dispatch")?;
-
-        // Exact name, then geometry, then first. Unknown output on multi-output
-        // means hotplug: bail so the caller rebuilds the Capturer.
+    /// Pick the wl_output for `output_name`: exact xdg-output name, then
+    /// geometry, then first. Unknown output on multi-output means hotplug:
+    /// bail so the caller rebuilds the Capturer.
+    fn pick_output(&self, output_name: &str, fallback: &OutRect) -> Result<(usize, i32)> {
+        if self.state.outputs.is_empty() {
+            bail!("compositor exposes no wl_output globals");
+        }
         let name_hit = self
             .state
             .outputs
@@ -304,9 +294,6 @@ impl Capturer {
                 && o.lw == fallback.width
                 && o.lh == fallback.height
         });
-        if self.state.outputs.is_empty() {
-            bail!("compositor exposes no wl_output globals");
-        }
         if self.state.outputs.len() > 1 && name_hit.is_none() && geom_hit.is_none() {
             bail!("output {output_name} unknown (hotplug?); rebuilding capturer");
         }
@@ -316,6 +303,24 @@ impl Capturer {
         } else {
             fallback.width.max(1)
         };
+        Ok((idx, logical_w))
+    }
+
+    /// Capture an output-local `rect`: whole output via wlr-screencopy, cropped
+    /// in software. The rect is clipped to the output by the caller.
+    pub fn capture(
+        &mut self,
+        output_name: &str,
+        rect: &Rect,
+        fallback: &OutRect,
+    ) -> Result<RgbaImage> {
+        let deadline = Instant::now() + ROUNDTRIP_TIMEOUT;
+        // Drain stale events (e.g. wl_buffer Release from the last shot).
+        self.queue
+            .dispatch_pending(&mut self.state)
+            .context("Wayland dispatch")?;
+
+        let (idx, logical_w) = self.pick_output(output_name, fallback)?;
 
         let shm = self.state.shm.clone().context("wl_shm lost")?;
         let manager = self
@@ -353,8 +358,35 @@ impl Capturer {
             bail!("screencopy: bogus buffer geometry {fw}x{fh} stride {stride}");
         }
 
-        // SHM backing must live on tmpfs: XDG_RUNTIME_DIR or bail.
         let size = stride as usize * fh as usize;
+        let backing = ShmBacking::new(size, idx)?;
+
+        let pool = shm.create_pool(backing.as_fd(), size as i32, &qh, ());
+        let buffer = pool.create_buffer(0, fw as i32, fh as i32, stride as i32, format, &qh, ());
+        pool.destroy();
+        frame.copy(&buffer);
+
+        self.wait_frame(deadline, "frame copy", |f| f.ready)?;
+
+        let rgba = convert_frame(backing.bytes(), fw, fh, stride, format)?;
+        buffer.destroy();
+        frame.destroy();
+
+        let full = RgbaImage::from_raw(fw, fh, rgba).context("assembling captured frame")?;
+        Ok(crop_to_rect(&full, rect, logical_w))
+    }
+}
+
+/// SHM backing for one shot. The file must outlive `create_pool`; the mapping
+/// outlives the copy.
+struct ShmBacking {
+    file: std::fs::File,
+    map: memmap2::MmapMut,
+}
+
+impl ShmBacking {
+    fn new(size: usize, idx: usize) -> Result<Self> {
+        // SHM backing must live on tmpfs: XDG_RUNTIME_DIR or bail.
         let dir = std::env::var_os("XDG_RUNTIME_DIR")
             .map(std::path::PathBuf::from)
             .context("XDG_RUNTIME_DIR not set; cannot create screencopy shm backing")?;
@@ -367,96 +399,81 @@ impl Capturer {
             .open(&path)
             .with_context(|| format!("creating shm backing {}", path.display()))?;
         file.set_len(size as u64).context("sizing shm backing")?;
-        // SAFETY: file is a fresh mapping we own; the compositor writes frame
-        // pixels into it exactly once before signalling Ready.
-        let mmap = unsafe { memmap2::MmapMut::map_mut(&file)? };
+        // SAFETY: fresh mapping we own; the compositor writes frame pixels into
+        // it exactly once before signalling Ready.
+        let map = unsafe { memmap2::MmapMut::map_mut(&file)? };
         let _ = std::fs::remove_file(&path);
-
-        let pool = shm.create_pool(file.as_fd(), size as i32, &qh, ());
-        let buffer = pool.create_buffer(0, fw as i32, fh as i32, stride as i32, format, &qh, ());
-        pool.destroy();
-        frame.copy(&buffer);
-
-        self.wait_frame(deadline, "frame copy", |f| f.ready)?;
-
-        // Convert wire pixels (native-endian xRGB) to RGBA. One loop
-        // per format: no per-pixel branch over millions of pixels.
-        let mut rgba = vec![0u8; fw as usize * fh as usize * 4];
-        let row = fw as usize * 4;
-        let stride_usz = stride as usize;
-        match format {
-            wl_shm::Format::Argb8888 => {
-                for y in 0..fh as usize {
-                    let src_row = &mmap[y * stride_usz..][..row];
-                    let dst_row = &mut rgba[y * row..][..row];
-                    let (src_px, _) = src_row.as_chunks::<4>();
-                    let (dst_px, _) = dst_row.as_chunks_mut::<4>();
-                    for (s, d) in src_px.iter().zip(dst_px.iter_mut()) {
-                        d[0] = s[2];
-                        d[1] = s[1];
-                        d[2] = s[0];
-                        d[3] = s[3];
-                    }
-                }
-            }
-            wl_shm::Format::Xrgb8888 => {
-                for y in 0..fh as usize {
-                    let src_row = &mmap[y * stride_usz..][..row];
-                    let dst_row = &mut rgba[y * row..][..row];
-                    let (src_px, _) = src_row.as_chunks::<4>();
-                    let (dst_px, _) = dst_row.as_chunks_mut::<4>();
-                    for (s, d) in src_px.iter().zip(dst_px.iter_mut()) {
-                        d[0] = s[2];
-                        d[1] = s[1];
-                        d[2] = s[0];
-                        d[3] = 255;
-                    }
-                }
-            }
-            wl_shm::Format::Abgr8888 => {
-                for y in 0..fh as usize {
-                    let src_row = &mmap[y * stride_usz..][..row];
-                    let dst_row = &mut rgba[y * row..][..row];
-                    let (src_px, _) = src_row.as_chunks::<4>();
-                    let (dst_px, _) = dst_row.as_chunks_mut::<4>();
-                    for (s, d) in src_px.iter().zip(dst_px.iter_mut()) {
-                        d[0] = s[0];
-                        d[1] = s[1];
-                        d[2] = s[2];
-                        d[3] = s[3];
-                    }
-                }
-            }
-            _ => {
-                debug_assert_eq!(format, wl_shm::Format::Xbgr8888);
-                for y in 0..fh as usize {
-                    let src_row = &mmap[y * stride_usz..][..row];
-                    let dst_row = &mut rgba[y * row..][..row];
-                    let (src_px, _) = src_row.as_chunks::<4>();
-                    let (dst_px, _) = dst_row.as_chunks_mut::<4>();
-                    for (s, d) in src_px.iter().zip(dst_px.iter_mut()) {
-                        d[0] = s[0];
-                        d[1] = s[1];
-                        d[2] = s[2];
-                        d[3] = 255;
-                    }
-                }
-            }
-        }
-        buffer.destroy();
-        frame.destroy();
-        drop(mmap);
-
-        let full = RgbaImage::from_raw(fw, fh, rgba).context("assembling captured frame")?;
-
-        // Rect is in sway logical pixels; the buffer may be scaled up.
-        let scale = fw as f64 / logical_w as f64;
-        let cx = ((rect.x as f64 * scale).round() as i32).clamp(0, fw as i32 - 1);
-        let cy = ((rect.y as f64 * scale).round() as i32).clamp(0, fh as i32 - 1);
-        let cw = ((rect.width as f64 * scale).round() as i32).clamp(1, fw as i32 - cx);
-        let ch = ((rect.height as f64 * scale).round() as i32).clamp(1, fh as i32 - cy);
-        Ok(image::imageops::crop_imm(&full, cx as u32, cy as u32, cw as u32, ch as u32).to_image())
+        Ok(Self { file, map })
     }
+
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.file.as_fd()
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.map
+    }
+}
+
+/// Convert a wire-format frame (native-endian xRGB) to RGBA. The const
+/// parameters keep the per-pixel loop branch-free while sharing one body.
+fn convert_frame(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: wl_shm::Format,
+) -> Result<Vec<u8>> {
+    let mut rgba = vec![0u8; width as usize * height as usize * 4];
+    let (w, h, s) = (width as usize, height as usize, stride as usize);
+    match format {
+        wl_shm::Format::Argb8888 => convert_rows::<true, true>(src, &mut rgba, w, h, s),
+        wl_shm::Format::Xrgb8888 => convert_rows::<true, false>(src, &mut rgba, w, h, s),
+        wl_shm::Format::Abgr8888 => convert_rows::<false, true>(src, &mut rgba, w, h, s),
+        wl_shm::Format::Xbgr8888 => convert_rows::<false, false>(src, &mut rgba, w, h, s),
+        other => bail!("screencopy: unsupported buffer format {other:?}"),
+    }
+    Ok(rgba)
+}
+
+fn convert_rows<const SWAP_RB: bool, const COPY_ALPHA: bool>(
+    src: &[u8],
+    dst: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+) {
+    let row = width * 4;
+    for y in 0..height {
+        let src_row = &src[y * stride..][..row];
+        let dst_row = &mut dst[y * row..][..row];
+        let (src_px, _) = src_row.as_chunks::<4>();
+        let (dst_px, _) = dst_row.as_chunks_mut::<4>();
+        for (s, d) in src_px.iter().zip(dst_px.iter_mut()) {
+            if SWAP_RB {
+                d[0] = s[2];
+                d[2] = s[0];
+            } else {
+                d[0] = s[0];
+                d[2] = s[2];
+            }
+            d[1] = s[1];
+            d[3] = if COPY_ALPHA { s[3] } else { 255 };
+        }
+    }
+}
+
+/// Crop an output-sized RGBA image to `rect` (output-local logical pixels),
+/// scaling for HiDPI buffers. `rect` is already clipped to the output.
+fn crop_to_rect(full: &RgbaImage, rect: &Rect, logical_w: i32) -> RgbaImage {
+    let scale = full.width() as f64 / logical_w as f64;
+    let fw = full.width() as i32;
+    let fh = full.height() as i32;
+    let cx = ((rect.x as f64 * scale).round() as i32).clamp(0, fw - 1);
+    let cy = ((rect.y as f64 * scale).round() as i32).clamp(0, fh - 1);
+    let cw = ((rect.width as f64 * scale).round() as i32).clamp(1, fw - cx);
+    let ch = ((rect.height as f64 * scale).round() as i32).clamp(1, fh - cy);
+    image::imageops::crop_imm(full, cx as u32, cy as u32, cw as u32, ch as u32).to_image()
 }
 
 // --- shared session (one persistent Capturer per thread, rebuilt on any error) ---
@@ -482,4 +499,34 @@ pub fn capture_rect(output_name: &str, rect: &Rect, fallback: &OutRect) -> Resul
         }
         r
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn converts_argb_to_rgba() {
+        // Little-endian ARGB in memory: [B, G, R, A].
+        let src = [0x30, 0x20, 0x10, 0x40];
+        let mut dst = [0u8; 4];
+        convert_rows::<true, true>(&src, &mut dst, 1, 1, 4);
+        assert_eq!(dst, [0x10, 0x20, 0x30, 0x40]);
+
+        let mut dst = [0u8; 4];
+        convert_rows::<true, false>(&src, &mut dst, 1, 1, 4);
+        assert_eq!(dst, [0x10, 0x20, 0x30, 255]);
+    }
+
+    #[test]
+    fn converts_abgr_and_handles_stride() {
+        // Two rows: one pixel + 4 bytes padding each.
+        let src = [
+            0x10, 0x20, 0x30, 0x40, 0xff, 0xff, 0xff, 0xff, 0x50, 0x60, 0x70, 0x80, 0xff, 0xff,
+            0xff, 0xff,
+        ];
+        let mut dst = [0u8; 8];
+        convert_rows::<false, true>(&src, &mut dst, 1, 2, 8);
+        assert_eq!(dst, [0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80]);
+    }
 }
