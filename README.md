@@ -36,9 +36,9 @@ curl -fsSL https://raw.githubusercontent.com/developic/sway-blur/main/install.sh
 
 #### Prerequisites
 
-- Sway (wlroots with `zwlr_screencopy_v1`)
+- Sway 1.11 or higher  ( lastest version is must better )
 - GTK 3, gtk-layer-shell
-- Rust toolchain
+- Rust
 
 ### Build and install
 
@@ -110,6 +110,7 @@ $HOME/.config/sway-blur/config.toml
 | `revalidate_ms` | 1000.0 | Timer re-check cadence, 0 = off |
 | `snapshot_cache_max` | 16 | Snapshots kept |
 
+- Use https://developic.dpdns.org/tools/sway-blur to preview and configure blur settings easily.
 ## Tech Stack
 
 | Layer | Technology |
