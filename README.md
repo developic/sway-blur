@@ -36,7 +36,7 @@ curl -fsSL https://raw.githubusercontent.com/developic/sway-blur/main/install.sh
 
 #### Prerequisites
 
-- Sway 1.11 or higher  ( lastest version is must better )
+- Sway 1.0 or higher  ( lastest version is must better )
 - GTK 3, gtk-layer-shell
 - Rust
 
